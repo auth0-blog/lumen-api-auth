@@ -3,7 +3,11 @@
 namespace App\Http\Middleware;
 
 use Closure;
-use Auth0\SDK\JWTVerifier;
+use Auth0\SDK\Exception\InvalidTokenException;
+use Auth0\SDK\Helpers\JWKFetcher;
+use Auth0\SDK\Helpers\Tokens\AsymmetricVerifier;
+use Auth0\SDK\Helpers\Tokens\TokenVerifier;
+
 
 class Auth0Middleware
 {
@@ -14,37 +18,55 @@ class Auth0Middleware
      * @param  \Closure  $next
      * @return mixed
      */
-    public function handle($request, Closure $next)
+    public function handle($request, Closure $next, $scopeRequired = null)
     {
-        if(!$request->hasHeader('Authorization')) {
-          return response()->json('Authorization Header not found', 401);
-        }
-
         $token = $request->bearerToken();
 
-        if($request->header('Authorization') == null || $token == null) {
-          return response()->json('No token provided', 401);
+        if(!$token) {
+            return response()->json('No token provided', 401);
         }
 
-        $this->retrieveAndValidateToken($token);
-        
+        $this->validateAndDecode($token);
+        $decodedToken = $this->validateAndDecode($token);
+        if ($scopeRequired && !$this->tokenHasScope($decodedToken, $scopeRequired)) {
+            return response()->json(['message' => 'Insufficient scope'], 403);
+        }
         return $next($request);
     }
 
-    public function retrieveAndValidateToken($token)
+    public function validateAndDecode($token)
     {
         try {
-            $verifier = new JWTVerifier([
-              'supported_algs' => ['RS256'],
-              'valid_audiences' => ['YOUR AUTH0_API_AUDIENCE'],
-              'authorized_iss' => ['YOUR_AUTH0_DOMAIN']
-            ]);
+            $jwksUri = env('AUTH0_DOMAIN') . '.well-known/jwks.json';
+    
+            $jwksFetcher = new JWKFetcher(null, [ 'base_uri' => $jwksUri ]);
+            $signatureVerifier = new AsymmetricVerifier($jwksFetcher);
+            $tokenVerifier = new TokenVerifier(env('AUTH0_DOMAIN'), env('AUTH0_AUD'), $signatureVerifier);
 
-            $decoded = $verifier->verifyAndDecode($token);
+            return $tokenVerifier->verify($token);
         }
-        catch(\Auth0\SDK\Exception\CoreException $e) {
+        catch(InvalidTokenException $e) {
             throw $e;
         };
     }
 
+    /**
+     * Check if a token has a specific scope.
+     *
+     * @param \stdClass $token - JWT access token to check.
+     * @param string $scopeRequired - Scope to check for.
+     *
+     * @return bool
+     */
+    protected function tokenHasScope($token, $scopeRequired)
+    {
+        if (empty($token['scope'])) {
+            return false;
+        }
+
+        $tokenScopes = explode(' ', $token['scope']);
+
+        return in_array($scopeRequired, $tokenScopes);
+    }
+  
 }
